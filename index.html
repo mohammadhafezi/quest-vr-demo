@@ -1,72 +1,398 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Quest VR Scene</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>4D Explorer — VR cross-sections</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #05060a; color: #e8ecff;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+  #ui { position: fixed; inset: 0; pointer-events: none; }
+  #panel { position: absolute; top: 12px; left: 12px; max-width: 320px;
+    background: rgba(12,16,30,.82); border: 1px solid #2a3560; border-radius: 14px;
+    padding: 14px 16px; pointer-events: auto; backdrop-filter: blur(6px); }
+  h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: .3px; }
+  .sub { font-size: 12px; color: #97a3d8; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  button.obj, button.mode { pointer-events: auto; cursor: pointer; font-size: 12px;
+    padding: 6px 10px; border-radius: 9px; border: 1px solid #33407a;
+    background: #171d38; color: #cdd6ff; }
+  button.obj.active, button.mode.active { background: #4460ff; border-color: #6f86ff; color: #fff; }
+  .legend { font-size: 11px; line-height: 1.55; color: #9aa6da; margin-top: 6px; }
+  .legend b { color: #d7deff; }
+  #enter { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); }
+  kbd { background:#222a4d; border:1px solid #3a4680; border-radius:5px; padding:0 5px; font-size:11px; }
+</style>
 </head>
-<body style="margin:0;">
+<body>
+<div id="ui">
+  <div id="panel">
+    <h1>4D Explorer</h1>
+    <div class="sub">Rotate 4-D shapes and watch their 3-D cross-section.</div>
+    <div class="row" id="objs"></div>
+    <div class="row" id="modes"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+</div>
 
-  <a-scene background="color: #ECECEC">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
 
-    <a-assets>
-      <img id="sky" src="https://cdn.aframe.io/360-image-gallery-boilerplate/img/sechelt.jpg" crossorigin="anonymous">
-    </a-assets>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
-    <!-- 360 skybox -->
-    <a-sky src="#sky" rotation="0 -130 0"></a-sky>
-
-    <!-- Floor -->
-    <a-plane rotation="-90 0 0" width="20" height="20" color="#4CAF50" shadow></a-plane>
-
-    <!-- Interactive floating cube -->
-    <a-box id="cube" position="0 1.5 -3" rotation="0 45 0" color="#4CC3D9"
-           shadow
-           animation="property: rotation; to: 0 405 0; loop: true; dur: 8000; easing: linear"
-           class="clickable"></a-box>
-
-    <!-- Interactive sphere -->
-    <a-sphere id="sphere" position="2 1.5 -4" radius="0.6" color="#EF2D5E" shadow class="clickable"></a-sphere>
-
-    <!-- Interactive cylinder -->
-    <a-cylinder id="cylinder" position="-2 1 -4" radius="0.5" height="1.5" color="#FFC65D" shadow class="clickable"></a-cylinder>
-
-    <!-- Text label -->
-    <a-text value="Look around and point at the shapes to interact!" position="0 3 -4" align="center" width="6" color="#222"></a-text>
-
-    <!-- Camera rig: WASD movement (core A-Frame) + look-controls + gaze cursor -->
-    <a-entity id="rig" position="0 0 2" wasd-controls>
-      <a-entity camera position="0 1.6 0" look-controls>
-        <a-entity cursor="fuse: false"
-                   position="0 0 -1"
-                   geometry="primitive: ring; radiusInner: 0.02; radiusOuter: 0.03"
-                   material="color: white; shader: flat"
-                   raycaster="objects: .clickable"></a-entity>
-      </a-entity>
-    </a-entity>
-
-    <!-- Quest controllers for pointing/clicking (core A-Frame components) -->
-    <a-entity laser-controls="hand: left" raycaster="objects: .clickable"></a-entity>
-    <a-entity laser-controls="hand: right" raycaster="objects: .clickable"></a-entity>
-
-  </a-scene>
-
-  <script>
-    var colors = ['#4CC3D9', '#EF2D5E', '#FFC65D', '#7BC8A4', '#B983FF'];
-    function cycleColor(el) {
-      var i = 0;
-      el.addEventListener('click', function () {
-        i = (i + 1) % colors.length;
-        el.setAttribute('color', colors[i]);
-      });
+// ---------- 4D object library ----------
+// Each object: { verts: [[x,y,z,w],...], edges: [[i,j],...] } or { type:'glome' }
+function normalize(verts) {
+  let m = 0;
+  for (const v of verts) m = Math.max(m, Math.hypot(v[0], v[1], v[2], v[3]));
+  return verts.map(v => v.map(c => c / m));
+}
+function edgesBySqDist(verts, target, eps = 1e-6) {
+  const e = [];
+  for (let i = 0; i < verts.length; i++)
+    for (let j = i + 1; j < verts.length; j++) {
+      let d = 0;
+      for (let k = 0; k < 4; k++) { const t = verts[i][k] - verts[j][k]; d += t * t; }
+      if (Math.abs(d - target) < eps) e.push([i, j]);
     }
-    window.addEventListener('DOMContentLoaded', function () {
-      ['#cube', '#sphere', '#cylinder'].forEach(function (sel) {
-        cycleColor(document.querySelector(sel));
-      });
-    });
-  </script>
+  return e;
+}
 
+function tesseract() {
+  const verts = [];
+  for (let i = 0; i < 16; i++)
+    verts.push([(i & 1) ? 1 : -1, (i & 2) ? 1 : -1, (i & 4) ? 1 : -1, (i & 8) ? 1 : -1]);
+  const edges = [];
+  for (let i = 0; i < 16; i++)
+    for (let j = i + 1; j < 16; j++) {
+      let diff = 0;
+      for (let k = 0; k < 4; k++) if (verts[i][k] !== verts[j][k]) diff++;
+      if (diff === 1) edges.push([i, j]);
+    }
+  return { verts: normalize(verts), edges };
+}
+
+function simplex5() { // regular 5-cell via normalized Helmert contrasts
+  const H = [
+    [1, -1, 0, 0, 0].map(x => x / Math.SQRT2),
+    [1, 1, -2, 0, 0].map(x => x / Math.sqrt(6)),
+    [1, 1, 1, -3, 0].map(x => x / Math.sqrt(12)),
+    [1, 1, 1, 1, -4].map(x => x / Math.sqrt(20)),
+  ];
+  const verts = [];
+  for (let i = 0; i < 5; i++) verts.push([H[0][i], H[1][i], H[2][i], H[3][i]]);
+  const edges = [];
+  for (let i = 0; i < 5; i++) for (let j = i + 1; j < 5; j++) edges.push([i, j]);
+  return { verts: normalize(verts), edges };
+}
+
+function cell16() { // 16-cell: ±unit axes
+  const verts = [];
+  for (let a = 0; a < 4; a++) for (const s of [1, -1]) {
+    const v = [0, 0, 0, 0]; v[a] = s; verts.push(v);
+  }
+  return { verts: normalize(verts), edges: edgesBySqDist(verts, 2) };
+}
+
+function cell24() { // 24-cell: all (±1,±1,0,0) permutations
+  const verts = [];
+  for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++)
+    for (const sa of [1, -1]) for (const sb of [1, -1]) {
+      const v = [0, 0, 0, 0]; v[a] = sa; v[b] = sb; verts.push(v);
+    }
+  return { verts: normalize(verts), edges: edgesBySqDist(verts, 2) };
+}
+
+const LIB = {
+  '5-cell':   { label: '5-cell (simplex)', data: simplex5() },
+  'tesseract':{ label: 'Tesseract (8-cell)', data: tesseract() },
+  '16-cell':  { label: '16-cell', data: cell16() },
+  '24-cell':  { label: '24-cell', data: cell24() },
+  'glome':    { label: 'Glome (3-sphere)', data: { type: 'glome' } },
+};
+const ORDER = ['5-cell', 'tesseract', '16-cell', '24-cell', 'glome'];
+
+// ---------- 4D math ----------
+const angles = { xy: 0, xz: 0, xw: 0, yz: 0, yw: 0, zw: 0 };
+const PLANES = [['xy',0,1],['xz',0,2],['xw',0,3],['yz',1,2],['yw',1,3],['zw',2,3]];
+function rotate4(v) {
+  let x = v[0], y = v[1], z = v[2], w = v[3];
+  const p = [x, y, z, w];
+  for (const [name, a, b] of PLANES) {
+    const t = angles[name]; if (!t) continue;
+    const c = Math.cos(t), s = Math.sin(t);
+    const va = p[a], vb = p[b];
+    p[a] = va * c - vb * s;
+    p[b] = va * s + vb * c;
+  }
+  return p;
+}
+const W_CAM = 2.5;                       // 4D perspective distance
+function project(p) {                    // 4D -> 3D perspective
+  const f = 1 / (W_CAM - p[3]);
+  return [p[0] * f * W_CAM, p[1] * f * W_CAM, p[2] * f * W_CAM];
+}
+
+// ---------- three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05060a);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 100);
+camera.position.set(0, 1.5, 0.9);
+
+scene.add(new THREE.AmbientLight(0x8899ff, 0.6));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1); dir.position.set(2, 4, 3); scene.add(dir);
+const dir2 = new THREE.DirectionalLight(0x6688ff, 0.6); dir2.position.set(-3, 1, -2); scene.add(dir2);
+scene.add(new THREE.GridHelper(6, 12, 0x1a2140, 0x11162c));
+
+// object holder (tabletop in front of viewer)
+const world = new THREE.Group();
+world.position.set(0, 1.4, -0.6);
+world.scale.setScalar(0.45);
+scene.add(world);
+
+const wireMat = new THREE.LineBasicMaterial({ color: 0x8fb4ff, transparent: true, opacity: 0.9 });
+const wire = new THREE.LineSegments(new THREE.BufferGeometry(), wireMat);
+world.add(wire);
+const vertMat = new THREE.PointsMaterial({ color: 0xcfe0ff, size: 0.05 });
+const pts = new THREE.Points(new THREE.BufferGeometry(), vertMat);
+world.add(pts);
+
+const crossMat = new THREE.MeshStandardMaterial({
+  color: 0xff5d8f, metalness: 0.1, roughness: 0.45,
+  transparent: true, opacity: 0.82, side: THREE.DoubleSide,
+  emissive: 0x3a0d1e, emissiveIntensity: 0.6,
+});
+let crossMesh = new THREE.Mesh(new THREE.BufferGeometry(), crossMat);
+world.add(crossMesh);
+const sphereGeoCache = new THREE.SphereGeometry(1, 32, 24);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(world.position);
+controls.enableDamping = true;
+controls.update();
+
+// ---------- state ----------
+let current = 'tesseract';
+let mode = 2;            // 0 projection, 1 cross-section, 2 both
+let sliceK = 0;         // hyperplane w = sliceK
+let autoSpin = true;
+let autoSweep = true;
+const MODE_LABELS = ['Projection', 'Cross-section', 'Both'];
+
+// ---------- rendering the current object ----------
+function buildWire(obj) {
+  if (obj.type === 'glome') {
+    const g = new THREE.WireframeGeometry(new THREE.SphereGeometry(0.75, 16, 12));
+    wire.geometry.dispose(); wire.geometry = g;
+    pts.geometry.dispose(); pts.geometry = new THREE.BufferGeometry();
+    return;
+  }
+  const posW = new Float32Array(obj.edges.length * 2 * 3);
+  wire.geometry.dispose();
+  wire.geometry = new THREE.BufferGeometry();
+  wire.geometry.setAttribute('position', new THREE.BufferAttribute(posW, 3));
+  const posV = new Float32Array(obj.verts.length * 3);
+  pts.geometry.dispose();
+  pts.geometry = new THREE.BufferGeometry();
+  pts.geometry.setAttribute('position', new THREE.BufferAttribute(posV, 3));
+}
+
+function updateGeometry() {
+  const obj = LIB[current].data;
+  const showProj = mode === 0 || mode === 2;
+  const showCross = mode === 1 || mode === 2;
+  wire.visible = showProj; pts.visible = showProj && obj.type !== 'glome';
+
+  if (obj.type === 'glome') {
+    // rotation of a sphere is a sphere; cross-section radius = sqrt(R^2 - k^2)
+    const R = 0.75;
+    if (showCross) {
+      const r = Math.sqrt(Math.max(0, R * R - sliceK * sliceK));
+      crossMesh.visible = r > 1e-3;
+      crossMesh.geometry = sphereGeoCache;
+      crossMesh.scale.setScalar(r);
+    } else crossMesh.visible = false;
+    return;
+  }
+  crossMesh.scale.setScalar(1);
+
+  // rotate all verts once
+  const R4 = obj.verts.map(rotate4);
+
+  // projection wireframe + vertices
+  if (showProj) {
+    const wp = wire.geometry.attributes.position.array;
+    for (let e = 0; e < obj.edges.length; e++) {
+      const [i, j] = obj.edges[e];
+      const a = project(R4[i]), b = project(R4[j]);
+      wp.set(a, e * 6); wp.set(b, e * 6 + 3);
+    }
+    wire.geometry.attributes.position.needsUpdate = true;
+    const vp = pts.geometry.attributes.position.array;
+    for (let i = 0; i < R4.length; i++) vp.set(project(R4[i]), i * 3);
+    pts.geometry.attributes.position.needsUpdate = true;
+  }
+
+  // 3D cross-section: intersect each edge with hyperplane w = sliceK
+  if (showCross) {
+    const cut = [];
+    for (const [i, j] of obj.edges) {
+      const wi = R4[i][3], wj = R4[j][3];
+      const di = wi - sliceK, dj = wj - sliceK;
+      if ((di > 0) === (dj > 0)) continue;   // no crossing (same side)
+      const t = di / (di - dj);
+      cut.push(new THREE.Vector3(
+        R4[i][0] + (R4[j][0] - R4[i][0]) * t,
+        R4[i][1] + (R4[j][1] - R4[i][1]) * t,
+        R4[i][2] + (R4[j][2] - R4[i][2]) * t,
+      ));
+    }
+    let geo = null;
+    if (cut.length >= 4) { try { geo = new ConvexGeometry(cut); } catch (e) { geo = null; } }
+    crossMesh.geometry.dispose();
+    crossMesh.geometry = geo || new THREE.BufferGeometry();
+    crossMesh.visible = !!geo;
+  } else {
+    crossMesh.visible = false;
+  }
+}
+
+function setObject(name) {
+  current = name;
+  buildWire(LIB[name].data);
+  angles.xy = angles.xz = angles.xw = angles.yz = angles.yw = angles.zw = 0;
+  syncButtons();
+}
+function setMode(m) { mode = m; syncButtons(); }
+
+// ---------- UI ----------
+const objsEl = document.getElementById('objs');
+ORDER.forEach(k => {
+  const b = document.createElement('button');
+  b.className = 'obj'; b.dataset.k = k; b.textContent = LIB[k].label;
+  b.onclick = () => setObject(k); objsEl.appendChild(b);
+});
+const modesEl = document.getElementById('modes');
+MODE_LABELS.forEach((lab, i) => {
+  const b = document.createElement('button');
+  b.className = 'mode'; b.dataset.m = i; b.textContent = lab;
+  b.onclick = () => setMode(i); modesEl.appendChild(b);
+});
+document.getElementById('legend').innerHTML =
+  '<b>In VR (Quest):</b> right stick = rotate through 4D (XW / YW), ' +
+  'left stick ←→ = rotate ZW, left stick ↕ = move the slice. ' +
+  'Right trigger = next shape · A = change view · left trigger = pause spin · grip = reset.<br>' +
+  '<b>Desktop:</b> drag to orbit · <kbd>Q/E</kbd><kbd>A/D</kbd><kbd>W/S</kbd> rotate 4D · ' +
+  '<kbd>←/→</kbd> slice · <kbd>Space</kbd> next shape · <kbd>V</kbd> view · <kbd>R</kbd> reset · <kbd>P</kbd> pause.';
+
+function syncButtons() {
+  document.querySelectorAll('button.obj').forEach(b => b.classList.toggle('active', b.dataset.k === current));
+  document.querySelectorAll('button.mode').forEach(b => b.classList.toggle('active', +b.dataset.m === mode));
+}
+
+// keyboard (desktop)
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { const i = ORDER.indexOf(current); setObject(ORDER[(i + 1) % ORDER.length]); e.preventDefault(); }
+  if (e.code === 'KeyV') setMode((mode + 1) % 3);
+  if (e.code === 'KeyR') setObject(current);
+  if (e.code === 'KeyP') autoSpin = !autoSpin;
+});
+addEventListener('keyup', e => keys[e.code] = false);
+
+// ---------- VR controllers ----------
+const factory = new XRControllerModelFactory();
+for (let i = 0; i < 2; i++) {
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(factory.createControllerModel(grip));
+  scene.add(grip);
+  const ray = renderer.xr.getController(i);
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0x4460ff }));
+  line.scale.z = 0.3; ray.add(line); scene.add(ray);
+}
+const prevBtn = { right0: false, rightA: false, left0: false, gripL: false, gripR: false };
+function handleXRInput(dt) {
+  const session = renderer.xr.getSession(); if (!session) return;
+  for (const src of session.inputSources) {
+    if (!src.gamepad) continue;
+    const ax = src.gamepad.axes, bt = src.gamepad.buttons;
+    const sx = ax[2] ?? ax[0] ?? 0, sy = ax[3] ?? ax[1] ?? 0;
+    const dead = v => Math.abs(v) < 0.15 ? 0 : v;
+    const rot = 1.6 * dt;
+    if (src.handedness === 'right') {
+      angles.xw += dead(sx) * rot;
+      angles.yw += dead(sy) * rot;
+      const trig = bt[0]?.pressed;
+      if (trig && !prevBtn.right0) { const i = ORDER.indexOf(current); setObject(ORDER[(i + 1) % ORDER.length]); }
+      prevBtn.right0 = trig;
+      const a = bt[4]?.pressed;
+      if (a && !prevBtn.rightA) setMode((mode + 1) % 3);
+      prevBtn.rightA = a;
+      const gr = bt[1]?.pressed;
+      if (gr && !prevBtn.gripR) setObject(current);
+      prevBtn.gripR = gr;
+    } else {
+      angles.zw += dead(sx) * rot;
+      sliceK = Math.max(-1.2, Math.min(1.2, sliceK - dead(sy) * dt * 1.2));
+      if (Math.abs(dead(sy)) > 0) autoSweep = false;
+      const trig = bt[0]?.pressed;
+      if (trig && !prevBtn.left0) autoSpin = !autoSpin;
+      prevBtn.left0 = trig;
+    }
+  }
+}
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  handleXRInput(dt);
+  // desktop keys
+  const r = 1.4 * dt;
+  if (keys.KeyQ) angles.xw -= r; if (keys.KeyE) angles.xw += r;
+  if (keys.KeyA) angles.yw -= r; if (keys.KeyD) angles.yw += r;
+  if (keys.KeyW) angles.zw -= r; if (keys.KeyS) angles.zw += r;
+  if (keys.ArrowLeft) { sliceK = Math.max(-1.2, sliceK - dt); autoSweep = false; }
+  if (keys.ArrowRight){ sliceK = Math.min(1.2, sliceK + dt); autoSweep = false; }
+
+  if (autoSpin) { angles.xw += 0.22 * dt; angles.zw += 0.13 * dt; }
+  if (autoSweep) sliceK = Math.sin(clock.elapsedTime * 0.35) * 0.9;
+
+  updateGeometry();
+  controls.update();
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(tick);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// init
+setObject(current); setMode(mode);
+</script>
 </body>
 </html>
